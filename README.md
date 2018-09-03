@@ -1,7 +1,7 @@
 From the top level directory, run the code with:
 `python generate_showtimes.py test_files/example_1.csv`
 
-You can also specify what date you want this to run for with an optional parameter:
+By default it runs with the current date. You can specify what date you want this to run for with an optional parameter:
 
 `python generate_showtimes.py test_files/example_1.csv --date 12/31/2015`
 
