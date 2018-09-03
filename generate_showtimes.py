@@ -1,14 +1,3 @@
-# Assuming everything is timezone unaware
-# Assuming movie times with runtimes < 1 hour will be formatted 0:43
-# Assuming moves with times > 24 hours are still in hours:minutes
-
-
-# Based on the example given, it's possible to end a movie within time_to_close
-# of the movie theater closing
-# aka: Something about Mary ends at 22:59 even though the theater closes at 23:00
-# and it should take 35 minutes to cleanup which puts it past closing
-# I hope the employees get paid those 34 minutes over overtime :)
-
 
 from datetime import datetime, timedelta
 import argparse
@@ -28,6 +17,7 @@ def main():
     if args.date:
         day = datetime.strptime(args.date, "%m/%d/%Y")
 
+    # First line of output, second line is blank
     output = [day.strftime('%A') + ' ' + day.strftime("%m/%d/%Y"), '']
 
     # Return the day of the week as an integer, where Monday is 0 and Sunday is 6
@@ -41,10 +31,14 @@ def main():
 
             cur_movie = Movie(line)
             output.append(str(cur_movie))
-            for time_str in theater.showtimes(cur_movie):
+            showtimes_for_movie = theater.showtimes(cur_movie)
+            if len(showtimes_for_movie) == 0:
+                output.append("No Showtimes For This Movie")
+            for time_str in showtimes_for_movie:
                 output.append(time_str)
             output.append('')
 
+    # Do the final printing. In another world this could be written to files/db
     for print_line in output:
         print(print_line)
 
@@ -55,10 +49,7 @@ class Movie:
         self.release_year = line[1]
         self.rating = line[2]
         self.hour_min_str = line[3]
-        self.hours, self.minutes = _time_str_to_hours_minutes(self.hour_min_str)
-        self.total_minutes = total_minutes(self.hours, self.minutes)
-        # This should be a theater parameter
-        self.rounded_total_minutes = round_up_to_multiple(self.total_minutes, 5)
+        self.total_minutes = time_str_to_minutes(self.hour_min_str)
 
     def __str__(self):
         return self.title + " - Rated " + self.rating + ", " + self.hour_min_str
@@ -72,19 +63,19 @@ def _time_str_to_hours_minutes(hour_minute_str):
 
 def time_str_to_minutes(hour_minute_str):
     hours, minutes = _time_str_to_hours_minutes(hour_minute_str)
-    return total_minutes(hours, minutes)
-
-
-def total_minutes(hours, minutes):
     return hours * 60 + minutes
 
 
-# Maybe some theaters will want to round up to a different multiple
-def round_up_to_multiple(total_min, multiple):
+# By default this function rounds up the total_min (int) to the multiple (int)
+def round_to_multiple(total_min, multiple, round_down=False):
     if total_min % multiple == 0:
         return total_min
     # NOTE: The double '/' does standard integer division
-    return ((total_min // multiple) + 1) * multiple
+    rounded_up = ((total_min // multiple) + 1) * multiple
+    if not round_down:
+        return rounded_up
+    # Subtract one multiple if we want to round down
+    return rounded_up - multiple
 
 
 def minutes_to_time_hour_repr(minutes):
@@ -103,53 +94,64 @@ ELEVEN_THIRTY_PM = "23:30"
 
 
 class Theater:
-    # Monday - Thursday 8:00am - 11:00pm
-    # Friday - Sunday 10:30am - 11:30pm
-    def __init__(self, day_of_week, time_to_open=60, time_to_change=35, start_time_multiple = 5):
+    def __init__(self, day_of_week, time_to_open=60, time_to_change=35, start_time_multiple=5):
+        self.day_of_week = day_of_week
+        self.time_to_open = time_to_open
+        self.time_to_change = time_to_change
+        self.start_time_multiple = start_time_multiple
+
         # These will be specified manually if they need to change
+        # For now:
+        # Monday - Thursday 8:00am - 11:00pm
+        # Friday - Sunday 10:30am - 11:30pm
         self.opening_times = {0: EIGHT_AM, 1: EIGHT_AM, 2: EIGHT_AM, 3: EIGHT_AM, 4:
                               EIGHT_AM, 5: TEN_THIRTY_AM, 6: TEN_THIRTY_AM}
         self.closing_times = {0: ELEVEN_PM, 1: ELEVEN_PM, 2: ELEVEN_PM, 3: ELEVEN_PM, 4:
                               ELEVEN_PM, 5: ELEVEN_THIRTY_PM, 6: ELEVEN_THIRTY_PM}
-
-        self.time_to_open = time_to_open
-        self.time_to_change = time_to_change
-
-        # It's  more important to get the rounded time
-        # self.rounded_time_to_open = round_up_to_multiple(time_to_open, 5)
-        self.rounded_time_to_change = round_up_to_multiple(time_to_change, 5)
-
-        self.day_of_week = day_of_week
-        self.daily_closing = self.closing_times.get(self.day_of_week)
+        self.today_open = self.opening_times.get(self.day_of_week)
+        self.today_close = self.closing_times.get(self.day_of_week)
 
     # Theoretically we could open at something like 956, and it takes 3 minutes to open
     # If I round both first, the first movie can't start until 10:05
-    # But it really should be able to start at 10:00. Therefore add, then round
-    def first_movie_start(self):
-        start_plus_open = time_str_to_minutes(self.opening_times.get(self.day_of_week)) + self.time_to_open
-        return round_up_to_multiple(start_plus_open, 5)
+    # But it really should be able to start at 10:00. Therefore first add, then round up
+    def earliest_movie_start(self):
+        start_plus_open = time_str_to_minutes(self.today_open) + self.time_to_open
+        return round_to_multiple(start_plus_open, self.start_time_multiple)
 
     def showtimes(self, movie):
         # For a given movie, return a list of showings (start-time, endtime)
         start_showtimes = []
         end_showtimes = []
-        max_ending_time = timedelta(minutes=time_str_to_minutes(self.daily_closing))
+        max_ending_time = timedelta(minutes=time_str_to_minutes(self.today_close))
 
         while True:
-            # Need to start at the consistent multiple
-            start_time = max_ending_time - timedelta(minutes=movie.rounded_total_minutes)
+            # Need to start at the consistent multiple, so we round actual start down to that multiple
+            est_start_time = max_ending_time - timedelta(minutes=movie.total_minutes)
+            rounded_start_time = round_to_multiple(est_start_time.seconds / 60, self.start_time_multiple,
+                                                   round_down=True)
+            actual_start_time = timedelta(minutes=rounded_start_time)
 
-            if start_time < timedelta(minutes=self.first_movie_start()):
+            # Base base: Can't start any movies before the earliest movie start time
+            if actual_start_time < timedelta(minutes=self.earliest_movie_start()):
                 break
-            # Movie actually ends at total_minutes + start (no rounding)
-            end_time = start_time + timedelta(minutes=movie.total_minutes)
 
-            start_showtimes.append(minutes_to_time_hour_repr(start_time.seconds/60))
+            # Movie actually ends at actual_start + total+minutes (no rounding)
+            end_time = actual_start_time + timedelta(minutes=movie.total_minutes)
+
+            start_showtimes.append(minutes_to_time_hour_repr(actual_start_time.seconds/60))
             end_showtimes.append(minutes_to_time_hour_repr(end_time.seconds/60))
-            # Set the next max ending time to before when the other move starts
-            max_ending_time = start_time - timedelta(minutes=self.rounded_time_to_change)
 
-        # I need them reversed and in a string format for printing
+            # Set the next max ending time to before when the other move starts
+            max_ending_time = actual_start_time - timedelta(minutes=self.time_to_change)
+
+        # As a safety check the final movie should end within start_time_multiple of closing
+        # Used for testing/debugging, commented out for now
+
+        # if time_str_to_minutes(self.today_close) - \
+        #         time_str_to_minutes(end_showtimes[0]) > self.start_time_multiple:
+        #     print("This should not happen")
+
+        # I need the showtimes reversed and in a string format for printing
         output_format = []
         for start_end in zip(reversed(start_showtimes), reversed(end_showtimes)):
             output_format.append('  {} - {}'.format(start_end[0], start_end[1]))
@@ -157,23 +159,23 @@ class Theater:
 
 
 def run_tests():
-    test_round_up_to_multiple()
+    test_round_to_multiple()
     test_minutes_to_time_hour_repr()
     test_movie_to_str()
     test_subtract_hour_min_strs()
 
 
-def test_round_up_to_multiple():
-    assert round_up_to_multiple(44, 5) == 45
-    assert round_up_to_multiple(0, 5) == 0
-    assert round_up_to_multiple(15, 5) == 15
-    assert round_up_to_multiple(31, 5) == 35
-    # I initially misread and thought start time was multiple of 15
-    assert round_up_to_multiple(31, 15) == 45
-    assert round_up_to_multiple(44, 15) == 45
-    assert round_up_to_multiple(0, 15) == 0
-    assert round_up_to_multiple(15, 15) == 15
-    assert round_up_to_multiple(31, 30) == 60
+def test_round_to_multiple():
+    assert round_to_multiple(44, 5) == 45
+    assert round_to_multiple(0, 5) == 0
+    assert round_to_multiple(15, 5) == 15
+    assert round_to_multiple(31, 5) == 35
+
+    assert round_to_multiple(31, 5, round_down=True) == 30
+    assert round_to_multiple(44, 5, round_down=True) == 40
+    assert round_to_multiple(15, 15, round_down=True) == 15
+    assert round_to_multiple(0, 5, round_down=True) == 0
+    assert round_to_multiple(29, 30, round_down=True) == 0
 
 
 def test_minutes_to_time_hour_repr():
